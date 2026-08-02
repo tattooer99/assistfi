@@ -11,6 +11,14 @@
 - изменение совокупного предложения стейблкоинов как прокси притока ликвидности;
 - Bitcoin ETF flows;
 - BTC/ETH DVOL и put/call ratio по OI и объёму.
+- S&P 500, Nasdaq 100, ES/NQ futures, DXY и VIX;
+- ставка ФРС, US 2Y/10Y и наклон кривой;
+- золото и WTI;
+- DAX, Euro Stoxx 50, FTSE 100;
+- Nikkei 225, Hang Seng и CSI 300;
+- EUR/USD и USD/JPY;
+- события высокой и средней важности на ближайшие 72 часа;
+- автоматический режим Risk-on, Mixed, Risk-off или Event risk.
 
 ## Источники
 
@@ -18,6 +26,9 @@
 - Alternative.me — Fear & Greed;
 - BGeometrics — ежедневные on-chain показатели, stablecoin supply и ETF flows;
 - Deribit — implied volatility и опционный put/call ratio.
+- Yahoo Finance — мировые индексы, фьючерсы, FX и сырьё (неофициальный публичный endpoint, возможна задержка);
+- U.S. Treasury и Federal Reserve Bank of New York — доходности и ставка;
+- Forex Factory weekly JSON — экономический календарь.
 
 BGeometrics Free ограничен 15 запросами в сутки. Приложение кэширует on-chain блок на 12 часов в памяти и в `.cache/onchain.json`. Это обычный временный JSON-файл, не база данных.
 
@@ -76,6 +87,7 @@ https://ВАШ-ДОМЕН.vercel.app/telegram/webhook
 - `/api/market` — 2 минуты;
 - `/api/options` — 5 минут;
 - `/api/onchain` — 12 часов.
+- `/api/global` — 5 минут.
 
 Кэш хранится в CDN Vercel, поэтому отдельная база данных не нужна. После каждого нового deployment кэш начинает заполняяться заново.
 

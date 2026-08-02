@@ -33,6 +33,16 @@ async function fetchJson(url, options = {}, timeoutMs = 12_000) {
   return response.json();
 }
 
+async function fetchText(url, options = {}, timeoutMs = 20_000) {
+  const response = await fetch(url, {
+    ...options,
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { "user-agent": "CryptoBrief/1.0", ...(options.headers || {}) },
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.text();
+}
+
 async function cached(key, ttlMs, loader) {
   const hit = memoryCache.get(key);
   if (hit && Date.now() - hit.at < ttlMs) return hit.value;
@@ -83,6 +93,154 @@ export async function getFearGreed() {
       previous: lastNumber(previous?.value),
       updatedAt: current?.timestamp ? new Date(Number(current.timestamp) * 1000).toISOString() : null,
       source: "Alternative.me",
+    };
+  });
+}
+
+const GLOBAL_TICKERS = {
+  sp500: ["^GSPC", "S&P 500", "США"],
+  nasdaq100: ["^NDX", "Nasdaq 100", "США"],
+  es: ["ES=F", "ES Futures", "США"],
+  nq: ["NQ=F", "NQ Futures", "США"],
+  vix: ["^VIX", "VIX", "Риск"],
+  dxy: ["DX-Y.NYB", "DXY", "Риск"],
+  gold: ["GC=F", "Gold", "Сырьё"],
+  wti: ["CL=F", "WTI", "Сырьё"],
+  euroStoxx: ["^STOXX50E", "Euro Stoxx 50", "Европа"],
+  dax: ["^GDAXI", "DAX", "Европа"],
+  ftse: ["^FTSE", "FTSE 100", "Европа"],
+  nikkei: ["^N225", "Nikkei 225", "Азия"],
+  hangSeng: ["^HSI", "Hang Seng", "Азия"],
+  csi300: ["000300.SS", "CSI 300", "Азия"],
+  eurusd: ["EURUSD=X", "EUR/USD", "FX"],
+  usdjpy: ["JPY=X", "USD/JPY", "FX"],
+};
+
+function changeFrom(points, current, days) {
+  if (!points.length || current == null) return null;
+  const cutoff = Date.now() / 1000 - days * 86400;
+  let reference = points[0];
+  for (const point of points) {
+    if (point.timestamp <= cutoff) reference = point;
+    else break;
+  }
+  return reference?.close ? ((current / reference.close) - 1) * 100 : null;
+}
+
+async function getYahooAsset(key, [symbol, label, region]) {
+  try {
+    const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+    url.search = new URLSearchParams({ range: "1mo", interval: "1d", includePrePost: "true" });
+    const payload = await fetchJson(url, {}, 15_000);
+    const result = payload.chart?.result?.[0];
+    if (!result) throw new Error("empty response");
+    const closes = result.indicators?.quote?.[0]?.close || [];
+    const points = (result.timestamp || []).map((timestamp, index) => ({ timestamp, close: lastNumber(closes[index]) })).filter((point) => point.close != null);
+    const current = lastNumber(result.meta?.regularMarketPrice) ?? points.at(-1)?.close ?? null;
+    const previous = points.length > 1 ? points.at(-2)?.close : lastNumber(result.meta?.chartPreviousClose);
+    return {
+      key, symbol, label, region, current,
+      change1d: previous ? ((current / previous) - 1) * 100 : null,
+      change7d: changeFrom(points, current, 7),
+      change30d: changeFrom(points, current, 30),
+      currency: result.meta?.currency || null,
+      updatedAt: result.meta?.regularMarketTime ? new Date(result.meta.regularMarketTime * 1000).toISOString() : null,
+      delayed: result.meta?.regularMarketTime ? Date.now() - result.meta.regularMarketTime * 1000 > 36 * 60 * 60_000 : true,
+    };
+  } catch (error) {
+    return { key, symbol, label, region, error: error.message, current: null };
+  }
+}
+
+async function getRates() {
+  const year = new Date().getUTCFullYear();
+  const treasuryUrl = `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${year}&page&_format=csv`;
+  const [effrPayload, treasuryCsv] = await Promise.all([
+    fetchJson("https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json", {}, 20_000),
+    fetchText(treasuryUrl, {}, 30_000),
+  ]);
+  const effr = effrPayload.refRates?.[0] || {};
+  const lines = treasuryCsv.trim().split(/\r?\n/);
+  const headers = lines[0].split(",").map((value) => value.replaceAll('"', "").trim());
+  const row = lines[1].split(",").map((value) => value.replaceAll('"', "").trim());
+  const previousRow = lines[2]?.split(",").map((value) => value.replaceAll('"', "").trim()) || [];
+  const record = Object.fromEntries(headers.map((header, index) => [header, row[index]]));
+  const previous = Object.fromEntries(headers.map((header, index) => [header, previousRow[index]]));
+  const us2y = lastNumber(record["2 Yr"]);
+  const us10y = lastNumber(record["10 Yr"]);
+  return {
+    effr: lastNumber(effr.percentRate),
+    targetFrom: lastNumber(effr.targetRateFrom),
+    targetTo: lastNumber(effr.targetRateTo),
+    us2y,
+    us10y,
+    curve10y2y: us2y != null && us10y != null ? us10y - us2y : null,
+    change2yBps: us2y != null && lastNumber(previous["2 Yr"]) != null ? (us2y - Number(previous["2 Yr"])) * 100 : null,
+    change10yBps: us10y != null && lastNumber(previous["10 Yr"]) != null ? (us10y - Number(previous["10 Yr"])) * 100 : null,
+    date: record.Date || effr.effectiveDate || null,
+    source: "U.S. Treasury · New York Fed",
+  };
+}
+
+async function getEconomicEvents() {
+  const payload = await fetchJson("https://nfs.faireconomy.media/ff_calendar_thisweek.json", {}, 20_000);
+  const now = Date.now();
+  const end = now + 72 * 60 * 60_000;
+  const allowed = new Set(["USD", "EUR", "GBP", "JPY", "CNY", "AUD", "NZD", "CAD", "CHF", "All"]);
+  return (Array.isArray(payload) ? payload : [])
+    .map((event) => ({
+      title: event.title,
+      currency: event.country,
+      datetime: new Date(event.date).toISOString(),
+      impact: event.impact,
+      forecast: event.forecast || null,
+      previous: event.previous || null,
+    }))
+    .filter((event) => {
+      const time = Date.parse(event.datetime);
+      return time >= now - 30 * 60_000 && time <= end && allowed.has(event.currency) && ["High", "Medium", "Holiday"].includes(event.impact);
+    })
+    .sort((a, b) => Date.parse(a.datetime) - Date.parse(b.datetime))
+    .slice(0, 18);
+}
+
+function buildRegime(assets, rates, events, btc) {
+  let score = 0;
+  const reasons = [];
+  const add = (condition, positive, negative) => {
+    if (condition == null) return;
+    score += condition ? 1 : -1;
+    reasons.push(condition ? positive : negative);
+  };
+  add(btc?.change24h == null ? null : btc.change24h >= 0, "BTC растёт", "BTC снижается");
+  add(assets.nq?.change1d == null ? null : assets.nq.change1d >= 0, "NQ поддерживает риск", "NQ под давлением");
+  add(assets.vix?.change1d == null ? null : assets.vix.change1d <= 0, "VIX снижается", "VIX растёт");
+  add(assets.dxy?.change1d == null ? null : assets.dxy.change1d <= 0, "DXY ослабевает", "DXY укрепляется");
+  add(rates.change2yBps == null ? null : rates.change2yBps <= 0, "US 2Y снижается", "US 2Y растёт");
+  const urgent = events.find((event) => event.impact === "High" && Date.parse(event.datetime) - Date.now() <= 8 * 60 * 60_000);
+  if (urgent) return { code: "event", label: "EVENT RISK", score, reasons, event: urgent.title };
+  if (score >= 3) return { code: "on", label: "RISK-ON", score, reasons };
+  if (score <= -3) return { code: "off", label: "RISK-OFF", score, reasons };
+  return { code: "mixed", label: "MIXED", score, reasons };
+}
+
+export async function getGlobalContext() {
+  return cached("global-context", 5 * 60_000, async () => {
+    const [assetRows, ratesResult, eventsResult, prices] = await Promise.all([
+      Promise.all(Object.entries(GLOBAL_TICKERS).map(([key, config]) => getYahooAsset(key, config))),
+      getRates().catch((error) => ({ error: error.message })),
+      getEconomicEvents().catch(() => []),
+      getPrices().catch(() => []),
+    ]);
+    const assets = Object.fromEntries(assetRows.map((asset) => [asset.key, asset]));
+    const btc = prices.find((asset) => asset.symbol === "BTC");
+    return {
+      assets,
+      rates: ratesResult,
+      events: eventsResult,
+      regime: buildRegime(assets, ratesResult, eventsResult, btc),
+      updatedAt: new Date().toISOString(),
+      source: "Yahoo Finance · U.S. Treasury · New York Fed · Forex Factory",
     };
   });
 }
@@ -228,11 +386,12 @@ async function safe(name, loader, warnings) {
 
 export async function buildBrief() {
   const warnings = [];
-  const [prices, fearGreed, onchain, derivatives] = await Promise.all([
+  const [prices, fearGreed, onchain, derivatives, global] = await Promise.all([
     safe("Цены", getPrices, warnings),
     safe("Fear & Greed", getFearGreed, warnings),
     safe("On-chain", getOnchain, warnings),
     safe("Опционы", getDerivatives, warnings),
+    safe("Глобальные рынки", getGlobalContext, warnings),
   ]);
   const btc = prices?.find((item) => item.symbol === "BTC");
   if (onchain?.etfFlow && btc?.price) {
@@ -244,6 +403,7 @@ export async function buildBrief() {
     fearGreed,
     onchain,
     derivatives,
+    global,
     warnings,
   };
 }
@@ -256,20 +416,46 @@ function sign(value, suffix = "%") {
   return value == null ? "н/д" : `${value >= 0 ? "+" : ""}${fmt(value)}${suffix}`;
 }
 
+function htmlEscape(value) {
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 export function briefMessage(data) {
   const btc = data.prices.find((row) => row.symbol === "BTC");
   const eth = data.prices.find((row) => row.symbol === "ETH");
   const o = data.onchain;
   const d = data.derivatives;
   const f = data.fearGreed;
+  const g = data.global;
+  const a = g?.assets || {};
+  const r = g?.rates || {};
+  const eventLines = (g?.events || []).slice(0, 6).map((event) => {
+    const time = new Date(event.datetime).toLocaleString("ru-RU", { timeZone: "Europe/Kyiv", weekday: "short", hour: "2-digit", minute: "2-digit" });
+    const values = [event.forecast ? `прогн. ${event.forecast}` : "", event.previous ? `пред. ${event.previous}` : ""].filter(Boolean).join(" · ");
+    return `${event.impact === "High" ? "🔴" : "🟠"} ${time} ${event.currency} — ${htmlEscape(event.title)}${values ? ` (${htmlEscape(values)})` : ""}`;
+  });
   return [
     "<b>CRYPTO BRIEF</b>",
     `Обновлено: ${new Date(data.updatedAt).toLocaleString("ru-RU", { timeZone: "Europe/Kyiv" })} Kyiv`,
+    g?.regime ? `<b>Режим: ${g.regime.label}</b>${g.regime.event ? ` · ${htmlEscape(g.regime.event)}` : ""}` : "",
+    "",
+    "<b>События — 72 часа</b>",
+    ...(eventLines.length ? eventLines : ["Нет событий высокой/средней важности"]),
     "",
     "<b>Рынок</b>",
     `₿ BTC  $${fmt(btc?.price, 0)}  | 24ч ${sign(btc?.change24h)} | 7д ${sign(btc?.change7d)} | 30д ${sign(btc?.change30d)}`,
     `Ξ ETH  $${fmt(eth?.price, 0)}  | 24ч ${sign(eth?.change24h)} | 7д ${sign(eth?.change7d)} | 30д ${sign(eth?.change30d)}`,
     `Fear & Greed: ${fmt(f?.value, 0)} (${f?.label || "н/д"})`,
+    "",
+    "<b>Глобальный риск</b>",
+    `S&P 500 ${fmt(a.sp500?.current)} (${sign(a.sp500?.change1d)}) | Nasdaq 100 ${fmt(a.nasdaq100?.current)} (${sign(a.nasdaq100?.change1d)})`,
+    `ES ${fmt(a.es?.current)} (${sign(a.es?.change1d)}) | NQ ${fmt(a.nq?.current)} (${sign(a.nq?.change1d)})`,
+    `DXY ${fmt(a.dxy?.current)} (${sign(a.dxy?.change1d)}) | VIX ${fmt(a.vix?.current)} (${sign(a.vix?.change1d)})`,
+    `EFFR ${fmt(r.effr)}% | target ${fmt(r.targetFrom)}–${fmt(r.targetTo)}%`,
+    `US 2Y ${fmt(r.us2y)}% (${sign(r.change2yBps, " bps")}) | US 10Y ${fmt(r.us10y)}% (${sign(r.change10yBps, " bps")})`,
+    `Gold $${fmt(a.gold?.current)} (${sign(a.gold?.change1d)}) | WTI $${fmt(a.wti?.current)} (${sign(a.wti?.change1d)})`,
+    `Европа: DAX ${sign(a.dax?.change1d)} | Euro Stoxx ${sign(a.euroStoxx?.change1d)} | FTSE ${sign(a.ftse?.change1d)}`,
+    `Азия: Nikkei ${sign(a.nikkei?.change1d)} | Hang Seng ${sign(a.hangSeng?.change1d)} | CSI 300 ${sign(a.csi300?.change1d)}`,
     "",
     "<b>On-chain и потоки</b>",
     `MVRV: ${fmt(o?.mvrv?.value, 3)}`,
@@ -371,6 +557,11 @@ const server = http.createServer(async (req, res) => {
       const warnings = [];
       const derivatives = await safe("Опционы", getDerivatives, warnings);
       return json(res, 200, { updatedAt: new Date().toISOString(), derivatives, warnings });
+    }
+    if (req.method === "GET" && url.pathname === "/api/global") {
+      const warnings = [];
+      const global = await safe("Глобальные рынки", getGlobalContext, warnings);
+      return json(res, 200, { updatedAt: new Date().toISOString(), global, warnings });
     }
     if (req.method === "GET" && url.pathname === "/api/brief") return json(res, 200, await buildBrief());
     if (req.method === "POST" && url.pathname === "/telegram/webhook") return await handleTelegram(req, res);
