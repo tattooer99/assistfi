@@ -76,6 +76,22 @@ section { margin-top: 28px; }
 .metric-note { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .metric-note strong { color: #aeb8c8; font-weight: 600; }
 .wide { grid-column: 1 / -1; }
+.event-list, .session-list { display: grid; gap: 7px; }
+.event-row, .session-row { display: grid; align-items: center; border: 1px solid var(--line); background: rgba(16, 21, 29, .78); border-radius: 12px; }
+.event-row { grid-template-columns: 68px 42px 1fr auto; gap: 8px; padding: 11px 12px; }
+.event-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: #c5cedb; }
+.event-currency { font-size: 10px; font-weight: 800; }
+.event-name { font-size: 11px; font-weight: 650; }
+.event-values { color: var(--muted); font-size: 9px; text-align: right; }
+.impact { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px rgba(240,185,11,.35); }
+.impact.high { background: var(--red); box-shadow: 0 0 8px rgba(255,107,118,.4); }
+.session-row { grid-template-columns: 72px repeat(3, 1fr); gap: 8px; padding: 12px; }
+.session-name { color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.session-market { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.session-market small { display: block; margin-bottom: 3px; color: var(--muted); font-family: Inter, sans-serif; }
+.regime-card { border-color: rgba(240,185,11,.3); background: linear-gradient(145deg, rgba(240,185,11,.11), var(--panel)); }
+.regime-card.on { border-color: rgba(83,214,156,.32); background: linear-gradient(145deg, rgba(83,214,156,.1), var(--panel)); }
+.regime-card.off { border-color: rgba(255,107,118,.32); background: linear-gradient(145deg, rgba(255,107,118,.1), var(--panel)); }
 .fear-track { height: 5px; margin-top: 12px; border-radius: 99px; background: linear-gradient(90deg, var(--red), var(--amber), var(--green)); }
 .fear-pin { width: 8px; height: 8px; border: 2px solid var(--bg); border-radius: 50%; background: white; transform: translate(-50%, -2px); }
 
@@ -92,4 +108,8 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line);
   .period { font-size: 9px; }
   .metric-card { min-height: 106px; padding: 13px; }
   .metric-value { font-size: 19px; }
+  .event-row { grid-template-columns: 60px 34px 1fr; }
+  .event-values { grid-column: 3; text-align: left; }
+  .session-row { grid-template-columns: 58px repeat(3, 1fr); gap: 5px; }
+  .session-market { font-size: 9px; }
 }

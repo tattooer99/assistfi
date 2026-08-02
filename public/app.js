@@ -7,6 +7,10 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
 const compactMoney = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 });
 
+function esc(value) {
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
 function valueClass(value) {
   return value > 0 ? "positive" : value < 0 ? "negative" : "neutral";
 }
@@ -28,6 +32,10 @@ function signed(value, suffix = "") {
 
 function date(value) {
   return value ? new Date(value).toLocaleString("ru-RU", { timeZone: "Europe/Kyiv", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "н/д";
+}
+
+function eventTime(value) {
+  return new Date(value).toLocaleString("ru-RU", { timeZone: "Europe/Kyiv", weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 function assetCard(asset) {
@@ -57,6 +65,17 @@ function render(data) {
   const f = data.fearGreed;
   const o = data.onchain;
   const d = data.derivatives;
+  const g = data.global;
+  const a = g?.assets || {};
+  const r = g?.rates || {};
+
+  const events = g?.events || [];
+  $("#events").innerHTML = events.length ? events.map((event) => `<article class="event-row">
+    <div class="event-time"><span class="impact ${event.impact === "High" ? "high" : ""}"></span>${eventTime(event.datetime)}</div>
+    <div class="event-currency">${esc(event.currency)}</div>
+    <div class="event-name">${esc(event.title)}</div>
+    <div class="event-values">${event.forecast ? `прогн. <strong>${esc(event.forecast)}</strong>` : ""}${event.previous ? ` · пред. ${esc(event.previous)}` : ""}</div>
+  </article>`).join("") : `<article class="event-row"><div class="event-name wide">Нет событий высокой или средней важности в ближайшие 72 часа</div></article>`;
 
   $("#updated").textContent = `Обновлено ${date(data.updatedAt)} · Kyiv`;
   $("#assets").classList.remove("skeleton-grid");
@@ -69,6 +88,34 @@ function render(data) {
     `Вчера: <strong>${num(f?.previous, 0)}</strong> · Alternative.me`,
     { wide: true, tone: fearTone, extra: `<div class="fear-track"><div class="fear-pin" style="margin-left:${f?.value || 0}%"></div></div>` },
   );
+
+  const marketMetric = (label, asset, note = "день / 7д / 30д") => metric(
+    label,
+    asset?.current == null ? "н/д" : num(asset.current, asset.current < 200 ? 2 : 0),
+    `${note}: <strong class="${valueClass(asset?.change1d)}">${percent(asset?.change1d)}</strong> · ${percent(asset?.change7d)} · ${percent(asset?.change30d)}`,
+  );
+  const regime = g?.regime;
+  $("#global").innerHTML = [
+    `<article class="metric-card wide regime-card ${esc(regime?.code || "")}"><div class="metric-label">Рыночный режим</div><div class="metric-value">${esc(regime?.label || "н/д")}</div><div class="metric-note">${regime?.event ? `Ближайший риск: <strong>${esc(regime.event)}</strong>` : esc((regime?.reasons || []).slice(0, 4).join(" · "))}</div></article>`,
+    marketMetric("S&P 500", a.sp500),
+    marketMetric("Nasdaq 100", a.nasdaq100),
+    marketMetric("ES Futures", a.es),
+    marketMetric("NQ Futures", a.nq),
+    marketMetric("DXY", a.dxy),
+    marketMetric("VIX", a.vix),
+    metric("Ставка ФРС", r.effr == null ? "н/д" : `${num(r.effr)}%`, `Target: <strong>${num(r.targetFrom)}–${num(r.targetTo)}%</strong> · ${r.date || ""}`),
+    metric("US 2Y / 10Y", r.us2y == null ? "н/д" : `${num(r.us2y)}% / ${num(r.us10y)}%`, `Δ ${signed(r.change2yBps, " bps")} / ${signed(r.change10yBps, " bps")} · curve ${signed(r.curve10y2y, "%")}`),
+    marketMetric("Gold", a.gold),
+    marketMetric("WTI", a.wti),
+  ].join("");
+
+  const session = (name, items) => `<article class="session-row"><div class="session-name">${name}</div>${items.map(([label, asset]) => `<div class="session-market"><small>${label}</small><span class="${valueClass(asset?.change1d)}">${percent(asset?.change1d)}</span></div>`).join("")}</article>`;
+  $("#regions").innerHTML = [
+    session("США", [["S&P", a.sp500], ["Nasdaq", a.nasdaq100], ["VIX", a.vix]]),
+    session("Европа", [["DAX", a.dax], ["Stoxx", a.euroStoxx], ["FTSE", a.ftse]]),
+    session("Азия", [["Nikkei", a.nikkei], ["H. Seng", a.hangSeng], ["CSI 300", a.csi300]]),
+    session("FX", [["DXY", a.dxy], ["EUR/USD", a.eurusd], ["USD/JPY", a.usdjpy]]),
+  ].join("");
 
   $("#onchain").innerHTML = [
     metric("MVRV", num(o?.mvrv?.value, 3), "Рыночная капитализация / realized cap"),
@@ -102,16 +149,18 @@ async function load() {
       fetch("/api/market", { cache: "no-store" }),
       fetch("/api/onchain", { cache: "no-store" }),
       fetch("/api/options", { cache: "no-store" }),
+      fetch("/api/global", { cache: "no-store" }),
     ]);
     if (responses.some((response) => !response.ok)) throw new Error("Источник временно недоступен");
-    const [market, chain, options] = await Promise.all(responses.map((response) => response.json()));
+    const [market, chain, options, globalData] = await Promise.all(responses.map((response) => response.json()));
     const data = {
       updatedAt: market.updatedAt,
       prices: market.prices || [],
       fearGreed: market.fearGreed,
       onchain: chain.onchain,
       derivatives: options.derivatives,
-      warnings: [...(market.warnings || []), ...(chain.warnings || []), ...(options.warnings || [])],
+      global: globalData.global,
+      warnings: [...(market.warnings || []), ...(chain.warnings || []), ...(options.warnings || []), ...(globalData.warnings || [])],
     };
     const btc = data.prices.find((row) => row.symbol === "BTC");
     if (data.onchain?.etfFlow && btc?.price) data.onchain.etfFlow.estimatedUsd = data.onchain.etfFlow.valueBtc * btc.price;
