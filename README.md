@@ -1,0 +1,84 @@
+# Crypto Brief Telegram Mini App
+
+Персональный брифинг BTC и ETH без базы данных и платных обязательных API.
+
+## Что показывает
+
+- BTC и ETH: цена, 24 часа, 7 и 30 дней;
+- Fear & Greed;
+- MVRV, SOPR и realized price;
+- агрегированный торговый объём BTC;
+- изменение совокупного предложения стейблкоинов как прокси притока ликвидности;
+- Bitcoin ETF flows;
+- BTC/ETH DVOL и put/call ratio по OI и объёму.
+
+## Источники
+
+- CoinGecko — цены и объём;
+- Alternative.me — Fear & Greed;
+- BGeometrics — ежедневные on-chain показатели, stablecoin supply и ETF flows;
+- Deribit — implied volatility и опционный put/call ratio.
+
+BGeometrics Free ограничен 15 запросами в сутки. Приложение кэширует on-chain блок на 12 часов в памяти и в `.cache/onchain.json`. Это обычный временный JSON-файл, не база данных.
+
+## Локальный запуск
+
+Требуется Node.js 22 или новее.
+
+```bash
+npm start
+```
+
+Откройте `http://localhost:3000`.
+
+## Telegram
+
+Создайте бота через BotFather и задайте переменные окружения по примеру `.env.example`:
+
+- `TELEGRAM_BOT_TOKEN` — токен бота;
+- `TELEGRAM_ALLOWED_USER_ID` — ваш Telegram ID; другие пользователи игнорируются;
+- `TELEGRAM_WEBHOOK_SECRET` — случайная секретная строка;
+- `PUBLIC_URL` — публичный HTTPS-адрес приложения.
+
+После публикации скопируйте `.env.example` в `.env`, заполните значения и один раз выполните:
+
+```bash
+npm run set-webhook
+```
+
+Команда `/brief` присылает текстовый брифинг и кнопку Mini App.
+
+## Публикация через GitHub и Vercel
+
+Проект подготовлен для Vercel Functions. База данных, постоянный диск и платные дополнения Vercel не нужны.
+
+1. Создайте новый репозиторий GitHub и загрузите в него файлы проекта.
+2. В Vercel выберите **Add New → Project** и импортируйте репозиторий.
+3. Framework Preset оставьте **Other**. Настройки из `vercel.json` определят папку `public` и serverless-функции из `api`.
+4. Добавьте Environment Variables для окружения **Production**:
+   - `TELEGRAM_BOT_TOKEN`;
+   - `TELEGRAM_ALLOWED_USER_ID`;
+   - `TELEGRAM_WEBHOOK_SECRET`;
+   - `PUBLIC_URL` — итоговый production URL, например `https://crypto-brief.vercel.app`.
+5. Выполните Deploy. После первого деплоя скопируйте production URL, добавьте его как `PUBLIC_URL` и сделайте Redeploy.
+6. Локально задайте те же переменные и один раз выполните `npm run set-webhook`. Либо откройте URL Telegram API `setWebhook` вручную.
+
+Webhook будет установлен на:
+
+```text
+https://ВАШ-ДОМЕН.vercel.app/telegram/webhook
+```
+
+Не добавляйте настоящий `.env` или токен бота в GitHub. В репозиторий загружается только безопасный `.env.example`.
+
+### Кэширование на Vercel
+
+- `/api/market` — 2 минуты;
+- `/api/options` — 5 минут;
+- `/api/onchain` — 12 часов.
+
+Кэш хранится в CDN Vercel, поэтому отдельная база данных не нужна. После каждого нового deployment кэш начинает заполняяться заново.
+
+## Альтернативный сервер
+
+Для обычного Node.js-хостинга оставлен `Dockerfile`. Проверка доступности: `GET /health`.
