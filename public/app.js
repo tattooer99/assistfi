@@ -181,15 +181,31 @@ async function load() {
   button.classList.add("busy");
   button.disabled = true;
   try {
-    const responses = await Promise.all([
-      fetch("/api/market", { cache: "no-store" }),
-      fetch("/api/onchain", { cache: "no-store" }),
-      fetch("/api/options", { cache: "no-store" }),
-      fetch("/api/global", { cache: "no-store" }),
-      fetch("/api/positioning", { cache: "no-store" }),
+    const getBlock = async (path, label) => {
+      try {
+        const response = await fetch(`${path}?t=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(28_000) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return { data: await response.json(), warning: null };
+      } catch (error) {
+        return { data: {}, warning: `${label}: ${error.name === "TimeoutError" ? "тайм-аут" : error.message}` };
+      }
+    };
+    const [marketResult, chainResult, optionsResult, globalResult, positioningResult] = await Promise.all([
+      getBlock("/api/market", "Цены"),
+      getBlock("/api/onchain", "On-chain"),
+      getBlock("/api/options", "Опционы"),
+      getBlock("/api/global", "Глобальные рынки"),
+      getBlock("/api/positioning", "Фьючерсы BTC"),
     ]);
-    if (responses.some((response) => !response.ok)) throw new Error("Источник временно недоступен");
-    const [market, chain, options, globalData, positioningData] = await Promise.all(responses.map((response) => response.json()));
+    const market = marketResult.data;
+    const chain = chainResult.data;
+    const options = optionsResult.data;
+    const globalData = globalResult.data;
+    const positioningData = positioningResult.data;
+    const requestWarnings = [marketResult, chainResult, optionsResult, globalResult, positioningResult].map((result) => result.warning).filter(Boolean);
+    if (!(market.prices || []).length && !chain.onchain && !options.derivatives && !globalData.global && !positioningData.positioning) {
+      throw new Error("Все источники временно недоступны");
+    }
     const data = {
       updatedAt: market.updatedAt,
       prices: market.prices || [],
@@ -198,7 +214,7 @@ async function load() {
       derivatives: options.derivatives,
       global: globalData.global,
       positioning: positioningData.positioning,
-      warnings: [...(market.warnings || []), ...(chain.warnings || []), ...(options.warnings || []), ...(globalData.warnings || []), ...(positioningData.warnings || [])],
+      warnings: [...requestWarnings, ...(market.warnings || []), ...(chain.warnings || []), ...(options.warnings || []), ...(globalData.warnings || []), ...(positioningData.warnings || [])],
     };
     const btc = data.prices.find((row) => row.symbol === "BTC");
     if (data.onchain?.etfFlow && btc?.price) data.onchain.etfFlow.estimatedUsd = data.onchain.etfFlow.valueBtc * btc.price;
@@ -216,3 +232,4 @@ async function load() {
 
 $("#refresh").addEventListener("click", load);
 load();
+
