@@ -131,7 +131,7 @@ async function getYahooAsset(key, [symbol, label, region]) {
   try {
     const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
     url.search = new URLSearchParams({ range: "1mo", interval: "1d", includePrePost: "true" });
-    const payload = await fetchJson(url, {}, 15_000);
+    const payload = await fetchJson(url, {}, 10_000);
     const result = payload.chart?.result?.[0];
     if (!result) throw new Error("empty response");
     const closes = result.indicators?.quote?.[0]?.close || [];
@@ -156,8 +156,8 @@ async function getRates() {
   const year = new Date().getUTCFullYear();
   const treasuryUrl = `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${year}&page&_format=csv`;
   const [effrPayload, treasuryCsv] = await Promise.all([
-    fetchJson("https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json", {}, 20_000),
-    fetchText(treasuryUrl, {}, 30_000),
+    fetchJson("https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json", {}, 12_000),
+    fetchText(treasuryUrl, {}, 15_000),
   ]);
   const effr = effrPayload.refRates?.[0] || {};
   const lines = treasuryCsv.trim().split(/\r?\n/);
@@ -186,7 +186,7 @@ async function getRates() {
 }
 
 async function getFredSeries(id) {
-  const text = await fetchText(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(id)}`, {}, 30_000);
+  const text = await fetchText(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(id)}`, {}, 15_000);
   return text.trim().split(/\r?\n/).slice(1).map((line) => {
     const [date, raw] = line.split(",");
     return { date, value: lastNumber(raw) };
@@ -278,7 +278,7 @@ export async function getPositioning() {
 }
 
 async function getEconomicEvents() {
-  const payload = await fetchJson("https://nfs.faireconomy.media/ff_calendar_thisweek.json", {}, 20_000);
+  const payload = await fetchJson("https://nfs.faireconomy.media/ff_calendar_thisweek.json", {}, 12_000);
   const now = Date.now();
   const end = now + 72 * 60 * 60_000;
   const allowed = new Set(["USD", "EUR", "GBP", "JPY", "CNY", "AUD", "NZD", "CAD", "CHF", "All"]);
@@ -689,3 +689,4 @@ const server = http.createServer(async (req, res) => {
 
 const launchedDirectly = process.argv[1] && normalize(process.argv[1]) === normalize(fileURLToPath(import.meta.url));
 if (launchedDirectly) server.listen(port, () => console.log(`Crypto Brief: http://localhost:${port}`));
+
