@@ -29,11 +29,12 @@ export default async function handler(req, res) {
   try {
     if (command === "/brief") {
       if (!base) throw new Error("PUBLIC_URL не настроен");
-      const [marketData, chainData, optionsData, globalData] = await Promise.all([
+      const [marketData, chainData, optionsData, globalData, positioningData] = await Promise.all([
         getJson(`${base}/api/market`),
         getJson(`${base}/api/onchain`),
         getJson(`${base}/api/options`),
         getJson(`${base}/api/global`),
+        getJson(`${base}/api/positioning`),
       ]);
       const data = {
         updatedAt: marketData.updatedAt,
@@ -42,7 +43,8 @@ export default async function handler(req, res) {
         onchain: chainData.onchain,
         derivatives: optionsData.derivatives,
         global: globalData.global,
-        warnings: [...(marketData.warnings || []), ...(chainData.warnings || []), ...(optionsData.warnings || []), ...(globalData.warnings || [])],
+        positioning: positioningData.positioning,
+        warnings: [...(marketData.warnings || []), ...(chainData.warnings || []), ...(optionsData.warnings || []), ...(globalData.warnings || []), ...(positioningData.warnings || [])],
       };
       const btc = data.prices.find((row) => row.symbol === "BTC");
       if (data.onchain?.etfFlow && btc?.price) data.onchain.etfFlow.estimatedUsd = data.onchain.etfFlow.valueBtc * btc.price;

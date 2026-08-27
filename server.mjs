@@ -168,18 +168,77 @@ async function getRates() {
   const previous = Object.fromEntries(headers.map((header, index) => [header, previousRow[index]]));
   const us2y = lastNumber(record["2 Yr"]);
   const us10y = lastNumber(record["10 Yr"]);
+  const us30y = lastNumber(record["30 Yr"]);
   return {
     effr: lastNumber(effr.percentRate),
     targetFrom: lastNumber(effr.targetRateFrom),
     targetTo: lastNumber(effr.targetRateTo),
     us2y,
     us10y,
+    us30y,
     curve10y2y: us2y != null && us10y != null ? us10y - us2y : null,
     change2yBps: us2y != null && lastNumber(previous["2 Yr"]) != null ? (us2y - Number(previous["2 Yr"])) * 100 : null,
     change10yBps: us10y != null && lastNumber(previous["10 Yr"]) != null ? (us10y - Number(previous["10 Yr"])) * 100 : null,
+    change30yBps: us30y != null && lastNumber(previous["30 Yr"]) != null ? (us30y - Number(previous["30 Yr"])) * 100 : null,
     date: record.Date || effr.effectiveDate || null,
     source: "U.S. Treasury · New York Fed",
   };
+}
+
+async function getFredSeries(id) {
+  const text = await fetchText(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(id)}`, {}, 30_000);
+  return text.trim().split(/\r?\n/).slice(1).map((line) => {
+    const [date, raw] = line.split(",");
+    return { date, value: lastNumber(raw) };
+  }).filter((point) => point.value != null).slice(-14);
+}
+
+function weeklyMetric(points) {
+  const current = points.at(-1);
+  const previous = points.at(-2);
+  const monthAgo = points.at(-5);
+  return {
+    value: current?.value ?? null,
+    date: current?.date || null,
+    change1w: current && previous ? current.value - previous.value : null,
+    change4w: current && monthAgo ? current.value - monthAgo.value : null,
+    series: points,
+  };
+}
+
+async function getFedLiquidity() {
+  const [tga, reserves] = await Promise.all([getFredSeries("WTREGEN"), getFredSeries("WRESBAL")]);
+  return {
+    tga: weeklyMetric(tga),
+    bankReserves: weeklyMetric(reserves),
+    unit: "USD millions",
+    source: "Federal Reserve · FRED",
+  };
+}
+
+function normalizePositioning(longShortRows, oiRows, source) {
+  const longShort = longShortRows.map((row) => ({
+    timestamp: Number(row.timestamp), ratio: lastNumber(row.longShortRatio),
+    long: lastNumber(row.longAccount), short: lastNumber(row.shortAccount),
+  })).filter((row) => row.ratio != null && Number.isFinite(row.timestamp)).sort((a, b) => a.timestamp - b.timestamp);
+  const openInterest = oiRows.map((row) => ({
+    timestamp: Number(row.timestamp), valueUsd: lastNumber(row.sumOpenInterestValue),
+  })).filter((row) => row.valueUsd != null && Number.isFinite(row.timestamp)).sort((a, b) => a.timestamp - b.timestamp);
+  return { symbol: "BTCUSDT", period: "4h", longShort, openInterest, source, updatedAt: new Date().toISOString() };
+}
+
+async function getBinancePositioning() {
+  const base = "https://fapi.binance.com/futures/data";
+  const query = "symbol=BTCUSDT&period=4h&limit=42";
+  const [longShort, openInterest] = await Promise.all([
+    fetchJson(`${base}/globalLongShortAccountRatio?${query}`, {}, 20_000),
+    fetchJson(`${base}/openInterestHist?${query}`, {}, 20_000),
+  ]);
+  return normalizePositioning(longShort, openInterest, "Binance Futures");
+}
+
+export async function getPositioning() {
+  return cached("btc-positioning", 5 * 60_000, getBinancePositioning);
 }
 
 async function getEconomicEvents() {
@@ -226,9 +285,10 @@ function buildRegime(assets, rates, events, btc) {
 
 export async function getGlobalContext() {
   return cached("global-context", 5 * 60_000, async () => {
-    const [assetRows, ratesResult, eventsResult, prices] = await Promise.all([
+    const [assetRows, ratesResult, liquidityResult, eventsResult, prices] = await Promise.all([
       Promise.all(Object.entries(GLOBAL_TICKERS).map(([key, config]) => getYahooAsset(key, config))),
       getRates().catch((error) => ({ error: error.message })),
+      getFedLiquidity().catch((error) => ({ error: error.message })),
       getEconomicEvents().catch(() => []),
       getPrices().catch(() => []),
     ]);
@@ -237,10 +297,11 @@ export async function getGlobalContext() {
     return {
       assets,
       rates: ratesResult,
+      liquidity: liquidityResult,
       events: eventsResult,
       regime: buildRegime(assets, ratesResult, eventsResult, btc),
       updatedAt: new Date().toISOString(),
-      source: "Yahoo Finance · U.S. Treasury · New York Fed · Forex Factory",
+      source: "Yahoo Finance · U.S. Treasury · Federal Reserve/FRED · New York Fed · Forex Factory",
     };
   });
 }
@@ -386,12 +447,13 @@ async function safe(name, loader, warnings) {
 
 export async function buildBrief() {
   const warnings = [];
-  const [prices, fearGreed, onchain, derivatives, global] = await Promise.all([
+  const [prices, fearGreed, onchain, derivatives, global, positioning] = await Promise.all([
     safe("Цены", getPrices, warnings),
     safe("Fear & Greed", getFearGreed, warnings),
     safe("On-chain", getOnchain, warnings),
     safe("Опционы", getDerivatives, warnings),
     safe("Глобальные рынки", getGlobalContext, warnings),
+    safe("Фьючерсы BTC", getPositioning, warnings),
   ]);
   const btc = prices?.find((item) => item.symbol === "BTC");
   if (onchain?.etfFlow && btc?.price) {
@@ -404,6 +466,7 @@ export async function buildBrief() {
     onchain,
     derivatives,
     global,
+    positioning,
     warnings,
   };
 }
@@ -429,6 +492,10 @@ export function briefMessage(data) {
   const g = data.global;
   const a = g?.assets || {};
   const r = g?.rates || {};
+  const l = g?.liquidity || {};
+  const p = data.positioning;
+  const latestRatio = p?.longShort?.at(-1);
+  const latestOi = p?.openInterest?.at(-1);
   const eventLines = (g?.events || []).slice(0, 6).map((event) => {
     const time = new Date(event.datetime).toLocaleString("ru-RU", { timeZone: "Europe/Kyiv", weekday: "short", hour: "2-digit", minute: "2-digit" });
     const values = [event.forecast ? `прогн. ${event.forecast}` : "", event.previous ? `пред. ${event.previous}` : ""].filter(Boolean).join(" · ");
@@ -453,6 +520,8 @@ export function briefMessage(data) {
     `DXY ${fmt(a.dxy?.current)} (${sign(a.dxy?.change1d)}) | VIX ${fmt(a.vix?.current)} (${sign(a.vix?.change1d)})`,
     `EFFR ${fmt(r.effr)}% | target ${fmt(r.targetFrom)}–${fmt(r.targetTo)}%`,
     `US 2Y ${fmt(r.us2y)}% (${sign(r.change2yBps, " bps")}) | US 10Y ${fmt(r.us10y)}% (${sign(r.change10yBps, " bps")})`,
+    `US 30Y ${fmt(r.us30y)}% (${sign(r.change30yBps, " bps")})`,
+    `TGA $${fmt(l.tga?.value == null ? null : l.tga.value / 1000, 1)}B (${sign(l.tga?.change1w == null ? null : l.tga.change1w / 1000, "B нед.")}) | Bank reserves $${fmt(l.bankReserves?.value == null ? null : l.bankReserves.value / 1e6, 2)}T (${sign(l.bankReserves?.change1w == null ? null : l.bankReserves.change1w / 1000, "B нед.")})`,
     `Gold $${fmt(a.gold?.current)} (${sign(a.gold?.change1d)}) | WTI $${fmt(a.wti?.current)} (${sign(a.wti?.change1d)})`,
     `Европа: DAX ${sign(a.dax?.change1d)} | Euro Stoxx ${sign(a.euroStoxx?.change1d)} | FTSE ${sign(a.ftse?.change1d)}`,
     `Азия: Nikkei ${sign(a.nikkei?.change1d)} | Hang Seng ${sign(a.hangSeng?.change1d)} | CSI 300 ${sign(a.csi300?.change1d)}`,
@@ -468,6 +537,10 @@ export function briefMessage(data) {
     "<b>Опционы</b>",
     `BTC DVOL: ${fmt(d?.btcDvol?.value, 1)} | P/C OI: ${fmt(d?.btcPutCall?.oiRatio, 2)}`,
     `ETH DVOL: ${fmt(d?.ethDvol?.value, 1)} | P/C OI: ${fmt(d?.ethPutCall?.oiRatio, 2)}`,
+    "",
+    "<b>BTC Futures</b>",
+    `Long/Short accounts: ${fmt(latestRatio?.ratio, 3)} | long ${sign(latestRatio?.long == null ? null : latestRatio.long * 100)} | short ${sign(latestRatio?.short == null ? null : latestRatio.short * 100)}`,
+    `Open interest: $${fmt(latestOi?.valueUsd == null ? null : latestOi.valueUsd / 1e9, 2)}B · ${p?.source || "н/д"}`,
     data.warnings.length ? `\n⚠️ Частично недоступно: ${data.warnings.join("; ")}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -562,6 +635,11 @@ const server = http.createServer(async (req, res) => {
       const warnings = [];
       const global = await safe("Глобальные рынки", getGlobalContext, warnings);
       return json(res, 200, { updatedAt: new Date().toISOString(), global, warnings });
+    }
+    if (req.method === "GET" && url.pathname === "/api/positioning") {
+      const warnings = [];
+      const positioning = await safe("Фьючерсы BTC", getPositioning, warnings);
+      return json(res, 200, { updatedAt: new Date().toISOString(), positioning, warnings });
     }
     if (req.method === "GET" && url.pathname === "/api/brief") return json(res, 200, await buildBrief());
     if (req.method === "POST" && url.pathname === "/telegram/webhook") return await handleTelegram(req, res);

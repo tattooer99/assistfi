@@ -60,6 +60,32 @@ function metric(label, value, note, options = {}) {
   </article>`;
 }
 
+function lineChart(label, points, accessor, formatter, options = {}) {
+  const values = points.map(accessor).filter((value) => Number.isFinite(value));
+  if (values.length < 2) return metric(label, "н/д", "Источник временно не ответил", { wide: true });
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (options.baseline != null) { min = Math.min(min, options.baseline); max = Math.max(max, options.baseline); }
+  const padding = Math.max((max - min) * .12, Math.abs(max || 1) * .005);
+  min -= padding; max += padding;
+  const width = 640; const height = 180; const left = 12; const top = 10; const plotW = width - 24; const plotH = height - 28;
+  const xy = points.map((point, index) => ({ x: left + index * plotW / (points.length - 1), y: top + (max - accessor(point)) * plotH / (max - min) }));
+  const path = xy.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+  const area = `${path} L${xy.at(-1).x.toFixed(1)},${(top + plotH).toFixed(1)} L${xy[0].x.toFixed(1)},${(top + plotH).toFixed(1)} Z`;
+  const baselineY = options.baseline == null ? null : top + (max - options.baseline) * plotH / (max - min);
+  const latest = values.at(-1);
+  const first = values[0];
+  return `<article class="chart-card">
+    <div class="chart-head"><div><div class="metric-label">${label}</div><div class="chart-value">${formatter(latest)}</div></div><div class="chart-change ${valueClass(latest - first)}">${options.changeFormatter ? options.changeFormatter(latest, first) : percent((latest / first - 1) * 100)}</div></div>
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${label}">
+      <defs><linearGradient id="${options.id}-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${options.color}" stop-opacity=".28"/><stop offset="1" stop-color="${options.color}" stop-opacity="0"/></linearGradient></defs>
+      ${baselineY == null ? "" : `<line x1="${left}" y1="${baselineY}" x2="${width-left}" y2="${baselineY}" class="chart-baseline"/>`}
+      <path d="${area}" fill="url(#${options.id}-fill)"/><path d="${path}" fill="none" stroke="${options.color}" stroke-width="3" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="chart-foot"><span>${new Date(points[0].timestamp).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" })}</span><span>${options.note || ""}</span><span>сейчас</span></div>
+  </article>`;
+}
+
 function render(data) {
   const btc = data.prices.find((row) => row.symbol === "BTC");
   const f = data.fearGreed;
@@ -68,6 +94,8 @@ function render(data) {
   const g = data.global;
   const a = g?.assets || {};
   const r = g?.rates || {};
+  const l = g?.liquidity || {};
+  const p = data.positioning;
 
   const events = g?.events || [];
   $("#events").innerHTML = events.length ? events.map((event) => `<article class="event-row">
@@ -105,8 +133,16 @@ function render(data) {
     marketMetric("VIX", a.vix),
     metric("Ставка ФРС", r.effr == null ? "н/д" : `${num(r.effr)}%`, `Target: <strong>${num(r.targetFrom)}–${num(r.targetTo)}%</strong> · ${r.date || ""}`),
     metric("US 2Y / 10Y", r.us2y == null ? "н/д" : `${num(r.us2y)}% / ${num(r.us10y)}%`, `Δ ${signed(r.change2yBps, " bps")} / ${signed(r.change10yBps, " bps")} · curve ${signed(r.curve10y2y, "%")}`),
+    metric("US 30Y yield", r.us30y == null ? "н/д" : `${num(r.us30y)}%`, `День: <strong class="${valueClass(r.change30yBps)}">${signed(r.change30yBps, " bps")}</strong> · U.S. Treasury`),
+    metric("TGA", l.tga?.value == null ? "н/д" : `$${num(l.tga.value / 1000, 1)}B`, `Неделя: <strong class="${valueClass(l.tga?.change1w)}">${signed(l.tga?.change1w == null ? null : l.tga.change1w / 1000, "B")}</strong> · ${l.tga?.date || ""}`),
+    metric("Bank reserves", l.bankReserves?.value == null ? "н/д" : `$${num(l.bankReserves.value / 1e6, 2)}T`, `Неделя: <strong class="${valueClass(l.bankReserves?.change1w)}">${signed(l.bankReserves?.change1w == null ? null : l.bankReserves.change1w / 1000, "B")}</strong> · ${l.bankReserves?.date || ""}`),
     marketMetric("Gold", a.gold),
     marketMetric("WTI", a.wti),
+  ].join("");
+
+  $("#positioning").innerHTML = [
+    lineChart("Long / Short accounts", p?.longShort || [], (point) => point.ratio, (value) => num(value, 3), { id: "ls", color: "#7d9dff", baseline: 1, note: "1.0 = баланс", changeFormatter: (latest, first) => signed(latest - first, "") }),
+    lineChart("BTC Open Interest", p?.openInterest || [], (point) => point.valueUsd, (value) => compactMoney.format(value), { id: "oi", color: "#f0b90b", note: p?.source || "Binance Futures" }),
   ].join("");
 
   const session = (name, items) => `<article class="session-row"><div class="session-name">${name}</div>${items.map(([label, asset]) => `<div class="session-market"><small>${label}</small><span class="${valueClass(asset?.change1d)}">${percent(asset?.change1d)}</span></div>`).join("")}</article>`;
@@ -150,9 +186,10 @@ async function load() {
       fetch("/api/onchain", { cache: "no-store" }),
       fetch("/api/options", { cache: "no-store" }),
       fetch("/api/global", { cache: "no-store" }),
+      fetch("/api/positioning", { cache: "no-store" }),
     ]);
     if (responses.some((response) => !response.ok)) throw new Error("Источник временно недоступен");
-    const [market, chain, options, globalData] = await Promise.all(responses.map((response) => response.json()));
+    const [market, chain, options, globalData, positioningData] = await Promise.all(responses.map((response) => response.json()));
     const data = {
       updatedAt: market.updatedAt,
       prices: market.prices || [],
@@ -160,7 +197,8 @@ async function load() {
       onchain: chain.onchain,
       derivatives: options.derivatives,
       global: globalData.global,
-      warnings: [...(market.warnings || []), ...(chain.warnings || []), ...(options.warnings || []), ...(globalData.warnings || [])],
+      positioning: positioningData.positioning,
+      warnings: [...(market.warnings || []), ...(chain.warnings || []), ...(options.warnings || []), ...(globalData.warnings || []), ...(positioningData.warnings || [])],
     };
     const btc = data.prices.find((row) => row.symbol === "BTC");
     if (data.onchain?.etfFlow && btc?.price) data.onchain.etfFlow.estimatedUsd = data.onchain.etfFlow.valueBtc * btc.price;
