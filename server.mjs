@@ -237,8 +237,44 @@ async function getBinancePositioning() {
   return normalizePositioning(longShort, openInterest, "Binance Futures");
 }
 
+async function getBybitPositioning() {
+  const base = "https://api.bybit.com/v5/market";
+  const [ratioPayload, oiPayload, tickerPayload] = await Promise.all([
+    fetchJson(`${base}/account-ratio?category=linear&symbol=BTCUSDT&period=4h&limit=42`, {}, 20_000),
+    fetchJson(`${base}/open-interest?category=linear&symbol=BTCUSDT&intervalTime=4h&limit=42`, {}, 20_000),
+    fetchJson(`${base}/tickers?category=linear&symbol=BTCUSDT`, {}, 20_000),
+  ]);
+  if (ratioPayload.retCode !== 0 || oiPayload.retCode !== 0 || tickerPayload.retCode !== 0) {
+    throw new Error("Bybit returned an API error");
+  }
+  const price = lastNumber(tickerPayload.result?.list?.[0]?.lastPrice);
+  const longShort = (ratioPayload.result?.list || []).map((row) => {
+    const long = lastNumber(row.buyRatio);
+    const short = lastNumber(row.sellRatio);
+    return {
+      timestamp: Number(row.timestamp),
+      ratio: long != null && short ? long / short : null,
+      long,
+      short,
+    };
+  }).filter((row) => row.ratio != null && Number.isFinite(row.timestamp)).sort((a, b) => a.timestamp - b.timestamp);
+  const openInterest = (oiPayload.result?.list || []).map((row) => ({
+    timestamp: Number(row.timestamp),
+    valueUsd: price == null ? null : lastNumber(row.openInterest) * price,
+  })).filter((row) => row.valueUsd != null && Number.isFinite(row.timestamp)).sort((a, b) => a.timestamp - b.timestamp);
+  return { symbol: "BTCUSDT", period: "4h", longShort, openInterest, source: "Bybit Futures", updatedAt: new Date().toISOString() };
+}
+
 export async function getPositioning() {
-  return cached("btc-positioning", 5 * 60_000, getBinancePositioning);
+  return cached("btc-positioning", 5 * 60_000, async () => {
+    const loaders = process.env.VERCEL ? [getBybitPositioning, getBinancePositioning] : [getBinancePositioning, getBybitPositioning];
+    let lastError;
+    for (const loader of loaders) {
+      try { return await loader(); }
+      catch (error) { lastError = error; }
+    }
+    throw lastError || new Error("Positioning sources unavailable");
+  });
 }
 
 async function getEconomicEvents() {
